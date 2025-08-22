@@ -1,0 +1,280 @@
+{
+  "name": "MAI - Media Asset Ingest (remoteproduction.io)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## MAI - Media Asset Ingest Workflow\n\n### Workflow Overview\nThis workflow orchestrates the media file ingestion process for remoteproduction.io\n\n### Components:\n1. **MAD Webhook Receiver** - Receives events from Cloudflare\n2. **File Validation** - Validates incoming file metadata\n3. **MAR Replication** - Handles file replication to multiple destinations\n4. **Slack Notification** - Notifies production team\n\n### Configuration Required:\n- Update webhook URL in Cloudflare Queue consumer\n- Configure rclone credentials\n- Set Slack webhook URL\n- Update SMB/S3 destination paths\n\n### Webhook Endpoint:\nAfter activating this workflow, your webhook URL will be:\n`https://remoteproduction.app.n8n.cloud/webhook/[WEBHOOK_ID]/mai-ingest`\n\n**IMPORTANT:** Copy this URL and configure it in your Cloudflare Queue consumer settings:\n1. Go to Cloudflare Dashboard\n2. Navigate to Queues\n3. Select your MAD queue\n4. Add consumer with this webhook URL\n5. Set max retries to 3\n6. Set visibility timeout to 300 seconds",
+        "height": 487.8859688906634,
+        "width": 542.3654219314567
+      },
+      "id": "e1a2b3c4-d5e6-7f8g-9h0i-j1k2l3m4n5o6",
+      "name": "Workflow Documentation",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        380,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mai-ingest",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "X-MAI-Status",
+                "value": "received"
+              }
+            ]
+          }
+        }
+      },
+      "id": "a1b2c3d4-e5f6-7g8h-9i0j-k1l2m3n4o5p6",
+      "name": "MAD Webhook Receiver",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        400
+      ],
+      "webhookId": "mai-ingest",
+      "notes": "This webhook receives events from Cloudflare MAD.\n\nExpected payload structure:\n{\n  \"eventType\": \"object-create\",\n  \"bucket\": \"mad-aller-media\",\n  \"object\": {\n    \"key\": \"DagbladetTV/video.mp4\",\n    \"size\": 1048576000,\n    \"eTag\": \"...\",\n    \"contentType\": \"video/mp4\"\n  },\n  \"event\": {\n    \"type\": \"PutObject\",\n    \"time\": \"2025-01-06T10:30:00Z\"\n  },\n  \"customer\": \"aller-media\",\n  \"uploadedBy\": \"cutting-room-integration\"\n}"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract and validate incoming webhook data\nconst items = $input.all();\nconst validatedItems = [];\n\nfor (const item of items) {\n  const payload = item.json;\n  \n  // Validate required fields\n  if (!payload.bucket || !payload.object || !payload.object.key) {\n    throw new Error('Invalid webhook payload: missing required fields');\n  }\n  \n  // Extract customer and brand from object key\n  // Expected format: CustomerName/BrandName/filename.ext\n  const pathParts = payload.object.key.split('/');\n  const customer = payload.customer || pathParts[0];\n  const brand = pathParts[1] || 'default';\n  const filename = pathParts[pathParts.length - 1];\n  \n  // Prepare enriched data for MAR replication\n  validatedItems.push({\n    json: {\n      // Original webhook data\n      ...payload,\n      \n      // Enriched metadata\n      metadata: {\n        customer: customer,\n        brand: brand,\n        filename: filename,\n        fileExtension: filename.split('.').pop(),\n        fileSizeMB: Math.round(payload.object.size / 1048576),\n        receivedAt: new Date().toISOString(),\n        workflowId: $workflow.id,\n        executionId: $execution.id\n      },\n      \n      // Source configuration for MAR\n      source: {\n        type: 'r2',\n        bucket: payload.bucket,\n        path: payload.object.key,\n        region: 'auto',\n        endpoint: 'https://[ACCOUNT_ID].r2.cloudflarestorage.com'\n      },\n      \n      // Destination configurations for MAR\n      destinations: [\n        {\n          type: 'SMB',\n          priority: 'high',\n          path: `\\\\\\\\production\\\\media\\\\${customer}\\\\${brand}\\\\`,\n          description: 'Production storage for editing'\n        },\n        {\n          type: 'S3',\n          priority: 'medium',\n          bucket: `archive-${customer}`,\n          path: `${brand}/${new Date().getFullYear()}/`,\n          description: 'Long-term archive storage'\n        },\n        {\n          type: 'CLOUDFLARE_STREAM',\n          priority: 'low',\n          enabled: payload.object.contentType?.startsWith('video/'),\n          description: 'Video streaming service'\n        }\n      ],\n      \n      // Replication options\n      replicationOptions: {\n        preserveMetadata: true,\n        verifyChecksum: true,\n        createDirectories: true,\n        maxRetries: 3,\n        retryDelaySeconds: 30\n      }\n    }\n  });\n}\n\nreturn validatedItems;"
+      },
+      "id": "b2c3d4e5-f6g7-h8i9-j0k1-l2m3n4o5p6q7",
+      "name": "Validate & Enrich Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        400
+      ],
+      "notes": "Validates webhook payload and enriches with metadata needed for replication.\n\nTODO:\n1. Update R2 endpoint URL with your Cloudflare account ID\n2. Adjust path parsing logic based on your naming convention\n3. Configure which file types should go to Cloudflare Stream"
+    },
+    {
+      "parameters": {
+        "jsCode": "// MAR - Media Asset Replicator Logic\n// This node implements the core MAR functionality\n\nconst items = $input.all();\nconst replicationResults = [];\n\nfor (const item of items) {\n  const data = item.json;\n  const results = {\n    source: data.source,\n    metadata: data.metadata,\n    replications: [],\n    status: 'processing',\n    startTime: new Date().toISOString()\n  };\n  \n  // Process each destination\n  for (const destination of data.destinations) {\n    // Skip disabled destinations\n    if (destination.enabled === false) {\n      continue;\n    }\n    \n    const replication = {\n      destination: destination,\n      status: 'pending',\n      command: '',\n      startTime: null,\n      endTime: null,\n      duration: null,\n      error: null\n    };\n    \n    try {\n      // Build rclone command based on destination type\n      switch (destination.type) {\n        case 'SMB':\n          replication.command = `rclone copy \\\\\n            \"r2:${data.source.bucket}/${data.source.path}\" \\\\\n            \"smb:${destination.path}\" \\\\\n            --metadata \\\\\n            --create-empty-src-dirs \\\\\n            --progress`;\n          \n          // TODO: Execute actual rclone command via SSH or HTTP Request node\n          replication.status = 'queued';\n          replication.notes = 'SMB replication queued - configure SSH/Execute Command node';\n          break;\n          \n        case 'S3':\n          replication.command = `rclone copy \\\\\n            \"r2:${data.source.bucket}/${data.source.path}\" \\\\\n            \"s3:${destination.bucket}/${destination.path}\" \\\\\n            --metadata \\\\\n            --checksum \\\\\n            --s3-storage-class GLACIER_IR`;\n          \n          // TODO: Execute actual rclone command\n          replication.status = 'queued';\n          replication.notes = 'S3 archive replication queued';\n          break;\n          \n        case 'CLOUDFLARE_STREAM':\n          // TODO: Implement Cloudflare Stream upload\n          replication.status = 'queued';\n          replication.notes = 'Stream upload queued - configure HTTP Request node for Stream API';\n          replication.apiEndpoint = 'https://api.cloudflare.com/client/v4/accounts/[ACCOUNT_ID]/stream/copy';\n          break;\n          \n        default:\n          replication.status = 'skipped';\n          replication.notes = `Unknown destination type: ${destination.type}`;\n      }\n      \n    } catch (error) {\n      replication.status = 'error';\n      replication.error = error.message;\n    }\n    \n    results.replications.push(replication);\n  }\n  \n  // Determine overall status\n  const hasErrors = results.replications.some(r => r.status === 'error');\n  const allComplete = results.replications.every(r => \n    r.status === 'completed' || r.status === 'skipped'\n  );\n  \n  if (hasErrors) {\n    results.status = 'failed';\n  } else if (allComplete) {\n    results.status = 'completed';\n  } else {\n    results.status = 'in_progress';\n  }\n  \n  results.endTime = new Date().toISOString();\n  replicationResults.push({ json: results });\n}\n\nreturn replicationResults;"
+      },
+      "id": "c3d4e5f6-g7h8-i9j0-k1l2-m3n4o5p6q7r8",
+      "name": "MAR - Execute Replication",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        400
+      ],
+      "notes": "Core MAR implementation.\n\nTODO:\n1. Add SSH node after this to execute rclone commands\n2. Or use HTTP Request to call rclone API\n3. Implement Cloudflare Stream API integration\n4. Add error handling and retry logic"
+    },
+    {
+      "parameters": {
+        "content": "## Replication Execution Options\n\n### Option 1: SSH Execute\nAdd SSH node to execute rclone commands on a server with rclone configured\n\n### Option 2: HTTP API\nIf you have rclone running in API mode, use HTTP Request node\n\n### Option 3: Container Job\nTrigger a containerized job (K8s Job, ECS Task, etc.)\n\n### rclone Configuration\nEnsure rclone.conf has these remotes configured:\n- r2: Cloudflare R2 source\n- smb: SMB/CIFS destination\n- s3: S3 archive destination",
+        "height": 280,
+        "width": 400
+      },
+      "id": "d4e5f6g7-h8i9-j0k1-l2m3-n4o5p6q7r8s9",
+      "name": "Replication Methods",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "condition1",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "condition2",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "in_progress",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "e5f6g7h8-i9j0-k1l2-m3n4-o5p6q7r8s9t0",
+      "name": "Check Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://hooks.slack.com/services/[YOUR]/[SLACK]/[WEBHOOK]",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"✅ Ny fil levert til produksjon\",\n  \"blocks\": [\n    {\n      \"type\": \"header\",\n      \"text\": {\n        \"type\": \"plain_text\",\n        \"text\": \"📦 Media Asset Ingest Completed\"\n      }\n    },\n    {\n      \"type\": \"section\",\n      \"fields\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Customer:*\\n{{ $json.metadata.customer }}\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Brand:*\\n{{ $json.metadata.brand }}\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Filename:*\\n{{ $json.metadata.filename }}\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Size:*\\n{{ $json.metadata.fileSizeMB }} MB\"\n        }\n      ]\n    },\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"*Replication Status:*\\n{{ $json.replications.map(r => `${r.destination.type}: ${r.status}`).join('\\n') }}\"\n      }\n    },\n    {\n      \"type\": \"context\",\n      \"elements\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"Workflow: MAI | Time: {{ $json.endTime }}\"\n        }\n      ]\n    }\n  ]\n}",
+        "options": {
+          "timeout": 10
+        }
+      },
+      "id": "f6g7h8i9-j0k1-l2m3-n4o5-p6q7r8s9t0u1",
+      "name": "Notify Slack - Success",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        320
+      ],
+      "notes": "TODO: Update Slack webhook URL\n\nGet webhook URL from:\n1. Go to Slack API: https://api.slack.com/apps\n2. Select your app or create new\n3. Enable Incoming Webhooks\n4. Add New Webhook to Workspace\n5. Copy webhook URL"
+    },
+    {
+      "parameters": {
+        "url": "https://hooks.slack.com/services/[YOUR]/[SLACK]/[WEBHOOK]",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"❌ Media Asset Ingest Failed\",\n  \"blocks\": [\n    {\n      \"type\": \"header\",\n      \"text\": {\n        \"type\": \"plain_text\",\n        \"text\": \"⚠️ Media Asset Ingest Error\"\n      }\n    },\n    {\n      \"type\": \"section\",\n      \"fields\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Customer:*\\n{{ $json.metadata?.customer || 'Unknown' }}\"\n        },\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"*Filename:*\\n{{ $json.metadata?.filename || $json.source?.path || 'Unknown' }}\"\n        }\n      ]\n    },\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"*Error Details:*\\n{{ $json.replications?.filter(r => r.status === 'error').map(r => `${r.destination.type}: ${r.error}`).join('\\n') || 'Unknown error' }}\"\n      }\n    },\n    {\n      \"type\": \"section\",\n      \"text\": {\n        \"type\": \"mrkdwn\",\n        \"text\": \"*Action Required:* Please check the workflow execution for details.\"\n      }\n    },\n    {\n      \"type\": \"context\",\n      \"elements\": [\n        {\n          \"type\": \"mrkdwn\",\n          \"text\": \"Workflow: MAI | Execution: {{ $execution.id }}\"\n        }\n      ]\n    }\n  ]\n}",
+        "options": {
+          "timeout": 10
+        }
+      },
+      "id": "g7h8i9j0-k1l2-m3n4-o5p6-q7r8s9t0u1v2",
+      "name": "Notify Slack - Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        480
+      ],
+      "notes": "TODO: Use same Slack webhook URL as success notification"
+    },
+    {
+      "parameters": {
+        "content": "## Error Handling & Monitoring\n\n### Add these nodes for production:\n\n1. **Error Trigger** - Catch workflow errors\n2. **Logging** - Send to CloudWatch/Datadog/etc\n3. **Metrics** - Track success/failure rates\n4. **Dead Letter Queue** - Store failed messages\n5. **Retry Logic** - Implement exponential backoff\n\n### Monitoring Endpoints:\n- Workflow metrics: `/metrics`\n- Health check: `/health`\n- Status page integration",
+        "height": 300,
+        "width": 350
+      },
+      "id": "h8i9j0k1-l2m3-n4o5-p6q7-r8s9t0u1v2w3",
+      "name": "Production Considerations",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2000,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Store replication job status for monitoring\n// This could be sent to a database or monitoring system\n\nconst items = $input.all();\nconst monitoringData = [];\n\nfor (const item of items) {\n  const data = item.json;\n  \n  // Prepare monitoring metrics\n  const metrics = {\n    timestamp: new Date().toISOString(),\n    customer: data.metadata?.customer,\n    brand: data.metadata?.brand,\n    filename: data.metadata?.filename,\n    fileSize: data.metadata?.fileSizeMB,\n    status: data.status,\n    replications: data.replications?.map(r => ({\n      destination: r.destination.type,\n      status: r.status,\n      priority: r.destination.priority\n    })),\n    executionId: $execution.id,\n    workflowId: $workflow.id,\n    workflowName: $workflow.name\n  };\n  \n  // TODO: Send to monitoring system\n  // Options:\n  // 1. PostgreSQL/MySQL - Store in database\n  // 2. CloudWatch - Send custom metrics\n  // 3. Datadog - Send to Datadog API\n  // 4. InfluxDB - Time series metrics\n  \n  monitoringData.push({ json: metrics });\n}\n\n// Log for debugging\nconsole.log('Monitoring data:', monitoringData);\n\nreturn monitoringData;"
+      },
+      "id": "i9j0k1l2-m3n4-o5p6-q7r8-s9t0u1v2w3x4",
+      "name": "Store Metrics",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        320
+      ],
+      "notes": "TODO: Add database node or HTTP request to monitoring API"
+    }
+  ],
+  "connections": {
+    "MAD Webhook Receiver": {
+      "main": [
+        [
+          {
+            "node": "Validate & Enrich Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Enrich Data": {
+      "main": [
+        [
+          {
+            "node": "MAR - Execute Replication",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MAR - Execute Replication": {
+      "main": [
+        [
+          {
+            "node": "Check Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Status": {
+      "main": [
+        [
+          {
+            "node": "Notify Slack - Success",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Store Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Slack - Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "",
+    "timezone": "Europe/Oslo"
+  },
+  "tags": [
+    {
+      "name": "remoteproduction.io"
+    },
+    {
+      "name": "MAI"
+    },
+    {
+      "name": "media-ingest"
+    }
+  ],
+  "pinData": {},
+  "versionId": "1.0.0",
+  "staticData": null
+}
