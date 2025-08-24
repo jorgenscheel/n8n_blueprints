@@ -1,0 +1,193 @@
+{
+  "name": "Cloudflare R2 Webhook to rclone Command",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "cloudflare-r2-webhook",
+        "responseMode": "responseNode",
+        "options": {
+          "responseContentType": "application/json",
+          "responsePropertyName": "data",
+          "responseHeaders": {}
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Receive from Cloudflare",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        220,
+        340
+      ],
+      "webhookId": "cloudflare-r2-webhook"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Extract data from the Cloudflare webhook payload\nconst payload = $input.item.json;\nconst r2Event = payload.r2Event;\nconst worker = payload.worker;\n\n// Extract R2 object details\nconst bucket = r2Event.bucket;\nconst objectKey = r2Event.object.key;\nconst objectSize = r2Event.object.size;\nconst contentType = r2Event.object.httpMetadata?.contentType || 'unknown';\nconst eventType = r2Event.eventType;\nconst eventTime = r2Event.eventTime;\n\n// Parse the object key to extract metadata\nconst keyParts = objectKey.split('/');\nconst fileName = keyParts[keyParts.length - 1];\nconst filePath = keyParts.slice(0, -1).join('/');\nconst fileExtension = fileName.split('.').pop();\n\n// Extract customer/brand from worker name if present\nlet customer = 'unknown';\nconst workerName = worker.name;\nif (workerName.includes('-')) {\n  const customerMatch = workerName.match(/(?:prod|staging|dev)-([^-]+)-/);\n  if (customerMatch) {\n    customer = customerMatch[1];\n  }\n}\n\n// Build rclone commands for different scenarios\n// Adjust these based on your specific rclone remotes and requirements\n\n// Example 1: Copy from R2 to local storage\nconst rcloneCopyLocal = `rclone copy r2:${bucket}/${objectKey} /local/storage/${customer}/${filePath}/ --progress`;\n\n// Example 2: Copy from R2 to another cloud storage (e.g., S3)\nconst rcloneCopyS3 = `rclone copy r2:${bucket}/${objectKey} s3:destination-bucket/${customer}/${objectKey} --s3-storage-class GLACIER_IR`;\n\n// Example 3: Sync entire folder\nconst rcloneSyncFolder = `rclone sync r2:${bucket}/${filePath}/ destination:${customer}/${filePath}/ --filter \"+ ${fileName}\" --filter \"- *\"`;\n\n// Example 4: Move with verification\nconst rcloneMoveVerified = `rclone move r2:${bucket}/${objectKey} archive:${customer}/${objectKey} --check-first --progress`;\n\n// Format file size for readability\nconst formatFileSize = (bytes) => {\n  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];\n  if (bytes === 0) return '0 Bytes';\n  const i = Math.floor(Math.log(bytes) / Math.log(1024));\n  return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];\n};\n\n// Create metadata object\nconst metadata = {\n  customer: customer,\n  bucket: bucket,\n  objectKey: objectKey,\n  fileName: fileName,\n  filePath: filePath,\n  fileExtension: fileExtension,\n  fileSize: objectSize,\n  fileSizeFormatted: formatFileSize(objectSize),\n  contentType: contentType,\n  eventType: eventType,\n  eventTime: eventTime,\n  workerName: workerName,\n  environment: worker.environment,\n  workerTimestamp: worker.timestamp\n};\n\n// Return the processed data\nreturn {\n  metadata: metadata,\n  commands: {\n    copyLocal: rcloneCopyLocal,\n    copyS3: rcloneCopyS3,\n    syncFolder: rcloneSyncFolder,\n    moveVerified: rcloneMoveVerified\n  },\n  // Primary command to use (customize based on your needs)\n  primaryCommand: rcloneCopyS3,\n  originalPayload: payload\n};"
+      },
+      "id": "code-processor",
+      "name": "Process R2 Event & Generate rclone Commands",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_CHANNEL_ID",
+          "mode": "list",
+          "cachedResultName": "Select a channel here"
+        },
+        "text": "=🚀 **New R2 File Event Received**\n\n**File Details:**\n• Customer: `{{ $json.metadata.customer }}`\n• File: `{{ $json.metadata.fileName }}`\n• Size: `{{ $json.metadata.fileSizeFormatted }}`\n• Type: `{{ $json.metadata.contentType }}`\n• Path: `{{ $json.metadata.bucket }}/{{ $json.metadata.objectKey }}`\n\n**📋 rclone Command:**\n```bash\n{{ $json.primaryCommand }}\n```\n\n**Alternative Commands:**\n• Copy to Local:\n```bash\n{{ $json.commands.copyLocal }}\n```\n• Move to Archive:\n```bash\n{{ $json.commands.moveVerified }}\n```\n\n**Event Info:**\n• Event Type: `{{ $json.metadata.eventType }}`\n• Event Time: `{{ $json.metadata.eventTime }}`\n• Worker: `{{ $json.metadata.workerName }}`\n• Environment: `{{ $json.metadata.environment }}`",
+        "otherOptions": {
+          "mrkdwn": true,
+          "sendAsUser": false
+        }
+      },
+      "id": "slack-notification",
+      "name": "Send to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        340
+      ],
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "YOUR_SLACK_CREDENTIAL_ID",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Webhook received and processed\",\n  \"timestamp\": \"{{ $now.toISO() }}\",\n  \"fileProcessed\": \"{{ $('code-processor').item.json.metadata.fileName }}\"\n}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              }
+            ]
+          }
+        }
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        940,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "error-check",
+              "leftValue": "={{ $json.r2Event.eventType }}",
+              "rightValue": "PutObject",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "event-filter",
+      "name": "Filter Event Type",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        340,
+        340
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Receive from Cloudflare": {
+      "main": [
+        [
+          {
+            "node": "Filter Event Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Event Type": {
+      "main": [
+        [
+          {
+            "node": "Process R2 Event & Generate rclone Commands",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process R2 Event & Generate rclone Commands": {
+      "main": [
+        [
+          {
+            "node": "Send to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Slack": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "cloudflare-r2-rclone"
+  },
+  "id": "cloudflare-r2-webhook-rclone",
+  "tags": []
+}
