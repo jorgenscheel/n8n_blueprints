@@ -1,10 +1,10 @@
 {
-  "name": "Cloudflare R2 Webhook to rclone Command",
+  "name": "CICD Test01 MAI - Cloudflare R2 to rclone",
   "nodes": [
     {
       "parameters": {
         "httpMethod": "POST",
-        "path": "cloudflare-r2-webhook",
+        "path": "cicd-test01-mai",
         "responseMode": "responseNode",
         "options": {
           "responseContentType": "application/json",
@@ -20,7 +20,7 @@
         220,
         340
       ],
-      "webhookId": "cloudflare-r2-webhook"
+      "webhookId": "cicd-test01-mai"
     },
     {
       "parameters": {
@@ -186,8 +186,8 @@
   "versionId": "1",
   "meta": {
     "templateCredsSetupCompleted": true,
-    "instanceId": "cloudflare-r2-rclone"
+    "instanceId": "cicd-test01-mai"
   },
-  "id": "cloudflare-r2-webhook-rclone",
+  "id": "cicd-test01-mai-workflow",
   "tags": []
 }
