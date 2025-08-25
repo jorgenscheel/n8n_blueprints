@@ -1,0 +1,296 @@
+{
+  "name": "Mediehub.net to Yodeck Video Playlist Updater",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mediehub-videos",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook from Mediehub",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "mediehub-video-updates",
+      "notes": "📥 WEBHOOK ENDPOINT\n\nThis webhook receives video updates from mediehub.net\n\nWebhook URL will be:\nhttps://your-n8n-instance.com/webhook/mediehub-videos\n\nExpected payload structure:\n{\n  \"videos\": [\n    {\n      \"id\": \"video-id\",\n      \"title\": \"Video Title\",\n      \"url\": \"https://cdn.mediehub.net/video.mp4\",\n      \"thumbnail\": \"https://cdn.mediehub.net/thumb.jpg\",\n      \"duration\": 120,\n      \"publishedAt\": \"2024-01-15T10:00:00Z\"\n    },\n    ...\n  ]\n}\n\nAdjust the parsing in next node based on actual payload!"
+    },
+    {
+      "parameters": {
+        "content": "## 🎯 WORKFLOW OVERVIEW\n\nThis workflow:\n1. Receives webhook from mediehub.net with video data\n2. Extracts the 3 latest videos\n3. Updates 3 fixed video slots in Yodeck playlist\n\n## 📋 PREREQUISITES\n\n1. **Yodeck Setup:**\n   - Create 3 Web Page media entries in Yodeck\n   - Add them to your playlist\n   - Note their Media IDs\n   - Generate API token\n\n2. **Mediehub Setup:**\n   - Configure webhook to send to this n8n instance\n   - Ensure video URLs are publicly accessible\n\n## 🔧 CONFIGURATION NEEDED\n\n1. Update Yodeck credentials\n2. Replace Media IDs in HTTP nodes\n3. Adjust JSON parsing based on actual webhook payload\n4. Test with single video first!",
+        "height": 400,
+        "width": 350
+      },
+      "id": "sticky-note-1",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [100, 50]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the webhook payload and extract latest 3 videos\n// Adjust this based on your actual mediehub.net payload structure\n\nconst payload = items[0].json;\nlet videos = [];\n\n// Handle different possible payload structures\nif (payload.videos && Array.isArray(payload.videos)) {\n  videos = payload.videos;\n} else if (payload.data && Array.isArray(payload.data)) {\n  videos = payload.data;\n} else if (Array.isArray(payload)) {\n  videos = payload;\n} else {\n  throw new Error('Unexpected payload structure. Check webhook data.');\n}\n\n// Sort videos by date (newest first)\n// Adjust the date field based on your actual data\nvideos.sort((a, b) => {\n  const dateA = new Date(a.publishedAt || a.created_at || a.date || 0);\n  const dateB = new Date(b.publishedAt || b.created_at || b.date || 0);\n  return dateB - dateA;\n});\n\n// Take only the latest 3 videos\nconst latestVideos = videos.slice(0, 3);\n\n// Prepare output with video data\nconst output = latestVideos.map((video, index) => {\n  return {\n    json: {\n      position: index + 1,\n      videoId: video.id || `video-${index + 1}`,\n      title: video.title || video.name || `Video ${index + 1}`,\n      url: video.url || video.video_url || video.src || '',\n      thumbnail: video.thumbnail || video.thumb || video.poster || '',\n      duration: video.duration || 30,\n      description: video.description || '',\n      // Add Yodeck media IDs - REPLACE THESE WITH YOUR ACTUAL MEDIA IDs\n      yodeckMediaId: [\n        'YOUR_YODECK_MEDIA_ID_1',\n        'YOUR_YODECK_MEDIA_ID_2', \n        'YOUR_YODECK_MEDIA_ID_3'\n      ][index]\n    }\n  };\n});\n\n// Add logging for debugging\nconsole.log(`Processed ${latestVideos.length} videos from ${videos.length} total`);\n\nreturn output;"
+      },
+      "id": "code-parser",
+      "name": "Parse & Extract Latest 3 Videos",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 300],
+      "notes": "⚙️ DATA PROCESSING\n\nThis node:\n1. Parses webhook payload\n2. Sorts videos by date\n3. Extracts latest 3\n4. Maps to Yodeck format\n\n⚠️ IMPORTANT:\n- Update the yodeckMediaId array with your actual Media IDs from Yodeck\n- Adjust field names based on actual mediehub payload"
+    },
+    {
+      "parameters": {
+        "content": "## 🔐 YODECK API SETUP\n\n1. **Get your API Token:**\n   - Log into Yodeck\n   - Account Settings > Advanced Settings > API Tokens\n   - Generate token with media update permissions\n\n2. **Find your Media IDs:**\n   - Use Yodeck API to list media:\n   ```\n   GET https://app.yodeck.com/api/v1/media\n   ```\n   - Or check in Yodeck UI (inspect network requests)\n\n3. **Create HTTP Credential:**\n   - Type: Header Auth\n   - Name: Authorization\n   - Value: Bearer YOUR_TOKEN_HERE",
+        "height": 350,
+        "width": 300
+      },
+      "id": "sticky-note-2",
+      "name": "Sticky Note 2",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [750, 50]
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "PATCH",
+        "url": "=https://app.yodeck.com/api/v1/media/{{ $json.yodeckMediaId }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"name\": \"{{ $json.title }}\",\n  \"url\": \"{{ $json.url }}\",\n  \"duration\": {{ $json.duration }},\n  \"description\": \"{{ $json.description }}\"\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "update-video-1",
+      "name": "Update Yodeck Video 1",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [750, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1",
+          "name": "Yodeck API"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "🎬 VIDEO SLOT 1\n\nUpdates the first video slot in Yodeck\n\n⚠️ Configure:\n1. Add Yodeck API credentials\n2. Verify Media ID is correct\n3. Test with GET request first"
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "PATCH",
+        "url": "=https://app.yodeck.com/api/v1/media/{{ $json.yodeckMediaId }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"name\": \"{{ $json.title }}\",\n  \"url\": \"{{ $json.url }}\",\n  \"duration\": {{ $json.duration }},\n  \"description\": \"{{ $json.description }}\"\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "update-video-2",
+      "name": "Update Yodeck Video 2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [950, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1",
+          "name": "Yodeck API"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "🎬 VIDEO SLOT 2\n\nUpdates the second video slot"
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "PATCH",
+        "url": "=https://app.yodeck.com/api/v1/media/{{ $json.yodeckMediaId }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"name\": \"{{ $json.title }}\",\n  \"url\": \"{{ $json.url }}\",\n  \"duration\": {{ $json.duration }},\n  \"description\": \"{{ $json.description }}\"\n}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "update-video-3",
+      "name": "Update Yodeck Video 3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1150, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1",
+          "name": "Yodeck API"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "🎬 VIDEO SLOT 3\n\nUpdates the third video slot"
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "success"
+            },
+            {
+              "name": "message",
+              "value": "=Successfully updated {{ $items().length }} videos in Yodeck playlist"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "prepare-response",
+      "name": "Prepare Success Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1550, 300],
+      "notes": "✅ WEBHOOK RESPONSE\n\nSends success confirmation back to mediehub.net"
+    },
+    {
+      "parameters": {
+        "content": "## 🚨 ERROR HANDLING\n\nAll HTTP nodes have `onError: continueErrorOutput`\n\nThis ensures:\n- Workflow continues even if one update fails\n- You can add error notification nodes\n- Check execution logs for failures\n\nConsider adding:\n1. Error notification (email/Slack)\n2. Retry logic\n3. Fallback video URLs",
+        "height": 250,
+        "width": 300
+      },
+      "id": "sticky-note-3",
+      "name": "Sticky Note 3",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1100, 50]
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "GET",
+        "url": "https://app.yodeck.com/api/v1/media",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "get-media-list",
+      "name": "Get Yodeck Media List (Helper)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [500, 500],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "1",
+          "name": "Yodeck API"
+        }
+      },
+      "disabled": true,
+      "notes": "🔍 HELPER NODE (Disabled)\n\nUse this to:\n1. Test API connection\n2. Get list of all media\n3. Find your Media IDs\n\nEnable and execute manually to get Media IDs"
+    },
+    {
+      "parameters": {
+        "content": "## 📝 TESTING CHECKLIST\n\n- [ ] Create Yodeck API credentials in n8n\n- [ ] Get 3 Media IDs from Yodeck\n- [ ] Update Media IDs in code node\n- [ ] Test webhook with sample payload\n- [ ] Verify video URLs are accessible\n- [ ] Check Yodeck playlist updates\n- [ ] Monitor for API rate limits\n- [ ] Set up error notifications\n\n## 🎥 Alternative: Web Page Method\n\nIf direct video updates don't work:\n1. Create 3 'Web Page' media in Yodeck\n2. Point them to video URLs\n3. Update the webpage URL via API\n\nChange endpoint to:\n`/api/v1/webpages/{id}`",
+        "height": 400,
+        "width": 300
+      },
+      "id": "sticky-note-4",
+      "name": "Sticky Note 4",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1450, 50]
+    }
+  ],
+  "connections": {
+    "Webhook from Mediehub": {
+      "main": [
+        [
+          {
+            "node": "Parse & Extract Latest 3 Videos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Extract Latest 3 Videos": {
+      "main": [
+        [
+          {
+            "node": "Update Yodeck Video 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Yodeck Video 1": {
+      "main": [
+        [
+          {
+            "node": "Update Yodeck Video 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Yodeck Video 2": {
+      "main": [
+        [
+          {
+            "node": "Update Yodeck Video 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Yodeck Video 3": {
+      "main": [
+        [
+          {
+            "node": "Prepare Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Success Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": {
+    "instanceId": "mediehub-yodeck-integration"
+  },
+  "tags": []
+}
