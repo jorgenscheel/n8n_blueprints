@@ -1,0 +1,293 @@
+{
+  "name": "Aller Media Norway CuttingRoom to TrueNAS media transfer v2",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "allermedia-ingest",
+        "options": {
+          "responseData": "allEntries"
+        }
+      },
+      "id": "ce8fb9e7-b246-4a8a-ae9a-b397193cf4d0",
+      "name": "Webhook - Receive from Cloudflare",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [
+        -600,
+        300
+      ],
+      "webhookId": "cloudflare-r2-webhook",
+      "notesInFlow": true,
+      "notes": "Receives events from Cloudflare Worker when files are uploaded to R2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the incoming data from webhook\nconst webhookData = $input.first().json;\n\n// Extract file information\nconst bucket = webhookData.bucket || 'prod-allermedia-ingest-r2';\nconst movKey = webhookData.key;\nconst jsonKey = movKey.replace('.mov', '.json');\n\n// Extract just the filename from the full key\nconst filename = movKey.split('/').pop();\nconst jsonFilename = filename.replace('.mov', '.json');\n\n// Create destination path with date folder structure\nconst today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD\nconst destinationBase = `CuttingRoom/${today}`;\n\n// Prepare data for both transfers\nreturn [\n  {\n    json: {\n      // MOV file transfer\n      mov: {\n        type: 'file',\n        s3Key: movKey,\n        storagePath: `${destinationBase}/${filename}`,\n        bucket: bucket\n      },\n      // JSON sidecar transfer\n      json: {\n        type: 'file',\n        s3Key: jsonKey,\n        storagePath: `${destinationBase}/${jsonFilename}`,\n        bucket: bucket\n      },\n      // Metadata for Slack notification\n      metadata: {\n        filename: filename,\n        size: webhookData.size || 0,\n        timestamp: webhookData.timestamp || new Date().toISOString(),\n        bucket: bucket,\n        destinationPath: `\\\\\\\\10.15.130.50\\\\Aller_Media_Norway_Incoming\\\\${destinationBase}`,\n        movKey: movKey,\n        jsonKey: jsonKey\n      },\n      // Keep original webhook data\n      original: webhookData\n    }\n  }\n];"
+      },
+      "id": "prepare-transfer-data",
+      "name": "Prepare Transfer Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        300
+      ],
+      "notesInFlow": true,
+      "notes": "Processes webhook data and prepares transfer commands for both MOV and JSON files"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://mediehub-storage-manager.remoteproduction.io/api/v1/transfer/file",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.mov }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        200
+      ],
+      "id": "transfer-mov-file",
+      "name": "Transfer MOV File",
+      "notesInFlow": true,
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "gsE8gxk9DNhyI32b",
+          "name": "mediehub-storage-manager"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "Transfers the MOV file from R2 to TrueNAS SMB share"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://mediehub-storage-manager.remoteproduction.io/api/v1/transfer/file",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.json }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        400
+      ],
+      "id": "transfer-json-sidecar",
+      "name": "Transfer JSON Sidecar",
+      "notesInFlow": true,
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "gsE8gxk9DNhyI32b",
+          "name": "mediehub-storage-manager"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "Transfers the JSON metadata file from R2 to TrueNAS SMB share"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get results from both transfers\nconst transferData = $input.first().json;\nconst metadata = transferData.metadata;\n\n// Check if we have both transfer results\nconst movTransferNode = $('Transfer MOV File').first();\nconst jsonTransferNode = $('Transfer JSON Sidecar').first();\n\n// Build status information\nlet statusEmoji = '✅';\nlet statusText = 'Transfer Complete';\n\nif (movTransferNode.error || jsonTransferNode.error) {\n  statusEmoji = '⚠️';\n  statusText = 'Transfer Completed with Warnings';\n}\n\n// Format file size\nconst formatFileSize = (bytes) => {\n  if (bytes === 0) return '0 Bytes';\n  const k = 1024;\n  const sizes = ['Bytes', 'KB', 'MB', 'GB'];\n  const i = Math.floor(Math.log(bytes) / Math.log(k));\n  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];\n};\n\n// Create Slack message with blocks\nconst slackMessage = {\n  text: `${statusEmoji} New CuttingRoom file ready: ${metadata.filename}`,\n  blocks: [\n    {\n      type: \"header\",\n      text: {\n        type: \"plain_text\",\n        text: `${statusEmoji} CuttingRoom ${statusText}`,\n        emoji: true\n      }\n    },\n    {\n      type: \"section\",\n      fields: [\n        {\n          type: \"mrkdwn\",\n          text: `*📹 File:*\\n${metadata.filename}`\n        },\n        {\n          type: \"mrkdwn\",\n          text: `*📦 Size:*\\n${formatFileSize(metadata.size)}`\n        },\n        {\n          type: \"mrkdwn\",\n          text: `*📅 Time:*\\n${new Date(metadata.timestamp).toLocaleString('no-NO', {timeZone: 'Europe/Oslo'})}`\n        },\n        {\n          type: \"mrkdwn\",\n          text: `*🗂️ Source:*\\nR2: ${metadata.bucket}`\n        }\n      ]\n    },\n    {\n      type: \"section\",\n      text: {\n        type: \"mrkdwn\",\n        text: `*📁 Destination:*\\n\\`${metadata.destinationPath}\\``\n      }\n    },\n    {\n      type: \"divider\"\n    },\n    {\n      type: \"context\",\n      elements: [\n        {\n          type: \"mrkdwn\",\n          text: `MOV: ${metadata.movKey} | JSON: ${metadata.jsonKey}`\n        }\n      ]\n    }\n  ]\n};\n\nreturn [{json: slackMessage}];"
+      },
+      "id": "format-slack-message",
+      "name": "Format Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "notesInFlow": true,
+      "notes": "Formats the Slack notification with transfer results"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C097XC1RP5G",
+          "mode": "list",
+          "cachedResultName": "n8n-sandbox"
+        },
+        "messageType": "blocks",
+        "blocksUi": "={{ $json }}",
+        "otherOptions": {}
+      },
+      "id": "send-to-slack-success",
+      "name": "Send Success to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        200,
+        300
+      ],
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "6vxW2skKaPjuXN2y",
+          "name": "Slack account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Sends success notification to #n8n-sandbox (change channel as needed)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get error information\nconst errorData = $input.first();\nconst metadata = errorData.json.metadata || {};\n\n// Determine which transfer failed\nlet errorSource = 'Unknown';\nif ($('Transfer MOV File').first().error) {\n  errorSource = 'MOV Transfer';\n}\nif ($('Transfer JSON Sidecar').first().error) {\n  errorSource = errorSource === 'Unknown' ? 'JSON Transfer' : 'Both Transfers';\n}\n\nconst slackErrorMessage = {\n  text: `❌ CuttingRoom Transfer Failed: ${metadata.filename || 'Unknown file'}`,\n  blocks: [\n    {\n      type: \"header\",\n      text: {\n        type: \"plain_text\",\n        text: \"❌ CuttingRoom Transfer Failed\",\n        emoji: true\n      }\n    },\n    {\n      type: \"section\",\n      fields: [\n        {\n          type: \"mrkdwn\",\n          text: `*File:*\\n${metadata.filename || 'Unknown'}`\n        },\n        {\n          type: \"mrkdwn\",\n          text: `*Failed Component:*\\n${errorSource}`\n        },\n        {\n          type: \"mrkdwn\",\n          text: `*Time:*\\n${new Date().toLocaleString('no-NO', {timeZone: 'Europe/Oslo'})}`\n        },\n        {\n          type: \"mrkdwn\",\n          text: `*Workflow:*\\n<https://remoteproduction.app.n8n.cloud/workflow/${$workflow.id}|View Execution>`\n        }\n      ]\n    },\n    {\n      type: \"section\",\n      text: {\n        type: \"mrkdwn\",\n        text: `*Error Details:*\\n\\`\\`\\`${JSON.stringify(errorData.error, null, 2).substring(0, 2000)}\\`\\`\\``\n      }\n    }\n  ]\n};\n\nreturn [{json: slackErrorMessage}];"
+      },
+      "id": "format-error-message",
+      "name": "Format Error Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        500
+      ],
+      "notesInFlow": true,
+      "notes": "Formats error notification for tech support"
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C097XC1RP5G",
+          "mode": "list",
+          "cachedResultName": "n8n-sandbox"
+        },
+        "messageType": "blocks",
+        "blocksUi": "={{ $json }}",
+        "otherOptions": {}
+      },
+      "id": "send-error-to-slack",
+      "name": "Send Error to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        200,
+        500
+      ],
+      "credentials": {
+        "slackOAuth2Api": {
+          "id": "6vxW2skKaPjuXN2y",
+          "name": "Slack account"
+        }
+      },
+      "notesInFlow": true,
+      "notes": "Sends error notification - change channel to #rp-tech-support for production"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Receive from Cloudflare": {
+      "main": [
+        [
+          {
+            "node": "Prepare Transfer Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Transfer Data": {
+      "main": [
+        [
+          {
+            "node": "Transfer MOV File",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Transfer JSON Sidecar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transfer MOV File": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transfer JSON Sidecar": {
+      "main": [
+        [
+          {
+            "node": "Format Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Send Success to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Message": {
+      "main": [
+        [
+          {
+            "node": "Send Error to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "cd0488995344f8ab1068dba7adbf692f63a52febd0a8556ab611bc1b866305bf"
+  },
+  "id": "",
+  "tags": []
+}
